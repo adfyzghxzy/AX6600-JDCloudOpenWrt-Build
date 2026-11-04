@@ -1,0 +1,96 @@
+name: Build OpenWrt 25.12.6 for JDCloud RE-CS-02
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/openwrt-25.yml'
+      - 'patches/**'
+      - 'scripts/check-sysupgrade.py'
+permissions:
+  contents: read
+jobs:
+  emmc-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt
+          ref: 64900e756efa667774214f9c6b17c113222e01f7
+          path: official
+      - name: Install OpenWrt build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev libelf-dev libfuse3-dev libpython3-dev file wget python3-pyelftools device-tree-compiler u-boot-tools squashfs-tools
+      - name: Configure the eMMC candidate profile
+        working-directory: official
+        run: |
+          git apply --check ../patches/re-cs-02.patch
+          git apply ../patches/re-cs-02.patch
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cat > .config <<'CONFIG'
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq60xx=y
+          CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-02=y
+          # CONFIG_TARGET_ROOTFS_INITRAMFS is not set
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG
+          make defconfig
+          grep -qx 'CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-02=y' .config
+          if grep -qx 'CONFIG_TARGET_ROOTFS_INITRAMFS=y' .config; then exit 1; fi
+          grep -qx 'CONFIG_TARGET_ROOTFS_SQUASHFS=y' .config
+          grep -qx 'CONFIG_PACKAGE_luci=y' .config
+          grep -qx 'CONFIG_PACKAGE_ipq-wifi-jdcloud_re-cs-02=y' .config
+      - name: Build OpenWrt
+        working-directory: official
+        run: make -j"$(nproc)" V=s > "$RUNNER_TEMP/openwrt-build.log" 2>&1 || { tail -200 "$RUNNER_TEMP/openwrt-build.log"; exit 1; }
+      - name: Verify sysupgrade structure, metadata and embedded FIT
+        run: |
+          set -o pipefail
+          shopt -s nullglob
+          images=(official/bin/targets/qualcommax/ipq60xx/*-jdcloud_re-cs-02-squashfs-sysupgrade.bin)
+          test "${#images[@]}" -eq 1
+          image="${images[0]}"
+          mkdir candidate
+          python3 scripts/check-sysupgrade.py "$image" | tee candidate/PREFLIGHT.json
+          official/staging_dir/host/bin/fwtool -q -i candidate/METADATA.json "$image"
+          python3 -c 'import json; metadata = json.load(open("candidate/METADATA.json")); assert "jdcloud,re-cs-02" in metadata["supported_devices"]; assert metadata["version"]["version"] == "25.12.6"'
+          tar -xOf "$image" sysupgrade-jdcloud_re-cs-02/kernel > "$RUNNER_TEMP/kernel.itb"
+          tar -xOf "$image" sysupgrade-jdcloud_re-cs-02/root > "$RUNNER_TEMP/root.squashfs"
+          unsquashfs -s "$RUNNER_TEMP/root.squashfs" > candidate/SQUASHFS.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" lib/upgrade/platform.sh > candidate/UPGRADE-PLATFORM.txt
+          grep -Fq 'CI_KERNPART="0:HLOS"' candidate/UPGRADE-PLATFORM.txt
+          grep -Fq 'CI_ROOTPART="rootfs"' candidate/UPGRADE-PLATFORM.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" www/cgi-bin/luci > /dev/null
+          fit="$RUNNER_TEMP/kernel.itb"
+          dumpimage -l "$fit" > candidate/FIT.txt
+          conf="$(fdtget "$fit" /configurations default)"
+          test "$conf" = 'config@cp03-c3'
+          kernel="$(fdtget "$fit" "/configurations/$conf" kernel)"
+          test "$(fdtget "$fit" "/images/$kernel" compression)" = gzip
+          test "$(fdtget -t x "$fit" "/images/$kernel" load)" = 41000000
+          test "$(fdtget -t x "$fit" "/images/$kernel" entry)" = 41000000
+          dumpimage -T flat_dt -p 1 -o "$RUNNER_TEMP/board.dtb" "$fit"
+          test "$(fdtget "$RUNNER_TEMP/board.dtb" / compatible)" = 'jdcloud,re-cs-02 qcom,ipq6018'
+          test "$(fdtget -t u "$RUNNER_TEMP/board.dtb" /soc/mmc@7804000 bus-width)" = 8
+          test "$(fdtget "$RUNNER_TEMP/board.dtb" /chosen bootargs-append)" = ' root=PARTLABEL=rootfs rootwait'
+          ports=(lan1 lan2 lan3 lan4 wan)
+          for i in "${!ports[@]}"; do
+            node="$(fdtget "$RUNNER_TEMP/board.dtb" /aliases "ethernet$i")"
+            test "$(fdtget "$RUNNER_TEMP/board.dtb" "$node" label)" = "${ports[i]}"
+          done
+          git -C official rev-parse HEAD > candidate/openwrt-commit.txt
+          cp official/.config candidate/resolved.config
+          cp official/bin/targets/qualcommax/ipq60xx/feeds.buildinfo candidate/
+          (cd "$(dirname "$image")" && sha256sum "$(basename "$image")") > candidate/SHA256SUMS
+          cp "$image" candidate/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: re-cs-02-openwrt-25.12.6-sysupgrade-candidate
+          path: candidate/
+          if-no-files-found: error
+

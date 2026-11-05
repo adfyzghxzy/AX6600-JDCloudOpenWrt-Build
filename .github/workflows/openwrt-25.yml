@@ -38,12 +38,18 @@ jobs:
           # CONFIG_TARGET_ROOTFS_INITRAMFS is not set
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_mkf2fs=y
+          CONFIG_PACKAGE_f2fsck=y
+          CONFIG_PACKAGE_kmod-fs-f2fs=y
           CONFIG
           make defconfig
           grep -qx 'CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-cs-02=y' .config
           if grep -qx 'CONFIG_TARGET_ROOTFS_INITRAMFS=y' .config; then exit 1; fi
           grep -qx 'CONFIG_TARGET_ROOTFS_SQUASHFS=y' .config
           grep -qx 'CONFIG_PACKAGE_luci=y' .config
+          grep -qx 'CONFIG_PACKAGE_mkf2fs=y' .config
+          grep -qx 'CONFIG_PACKAGE_f2fsck=y' .config
+          grep -qx 'CONFIG_PACKAGE_kmod-fs-f2fs=y' .config
           grep -qx 'CONFIG_PACKAGE_ipq-wifi-jdcloud_re-cs-02=y' .config
       - name: Build OpenWrt
         working-directory: official
@@ -66,6 +72,11 @@ jobs:
           grep -Fq 'CI_KERNPART="0:HLOS"' candidate/UPGRADE-PLATFORM.txt
           grep -Fq 'CI_ROOTPART="rootfs"' candidate/UPGRADE-PLATFORM.txt
           unsquashfs -cat "$RUNNER_TEMP/root.squashfs" www/cgi-bin/luci > /dev/null
+          unsquashfs -ll "$RUNNER_TEMP/root.squashfs" > candidate/ROOTFS-FILES.txt
+          grep -Eq 'root/usr/sbin/mkfs[.]f2fs$' candidate/ROOTFS-FILES.txt
+          grep -Eq 'root/usr/sbin/fsck[.]f2fs$' candidate/ROOTFS-FILES.txt
+          grep -Eq 'root/lib/modules/[^/]+/f2fs[.]ko$' candidate/ROOTFS-FILES.txt
+          grep -Eq 'root/etc/modules-boot[.]d/[^ ]*f2fs$' candidate/ROOTFS-FILES.txt
           fit="$RUNNER_TEMP/kernel.itb"
           dumpimage -l "$fit" > candidate/FIT.txt
           conf="$(fdtget "$fit" /configurations default)"

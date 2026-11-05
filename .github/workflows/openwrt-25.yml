@@ -57,6 +57,7 @@ jobs:
       - name: Verify sysupgrade structure, metadata and embedded FIT
         run: |
           set -o pipefail
+          set -x
           shopt -s nullglob
           images=(official/bin/targets/qualcommax/ipq60xx/*-jdcloud_re-cs-02-squashfs-sysupgrade.bin)
           test "${#images[@]}" -eq 1
@@ -73,10 +74,17 @@ jobs:
           grep -Fq 'CI_ROOTPART="rootfs"' candidate/UPGRADE-PLATFORM.txt
           unsquashfs -cat "$RUNNER_TEMP/root.squashfs" www/cgi-bin/luci > /dev/null
           unsquashfs -ll "$RUNNER_TEMP/root.squashfs" > candidate/ROOTFS-FILES.txt
-          grep -Eq 'root/usr/sbin/mkfs[.]f2fs$' candidate/ROOTFS-FILES.txt
-          grep -Eq 'root/usr/sbin/fsck[.]f2fs$' candidate/ROOTFS-FILES.txt
-          grep -Eq 'root/lib/modules/[^/]+/f2fs[.]ko$' candidate/ROOTFS-FILES.txt
-          grep -Eq 'root/etc/modules-boot[.]d/[^ ]*f2fs$' candidate/ROOTFS-FILES.txt
+          rootdir="$RUNNER_TEMP/rootfs-check"
+          unsquashfs -d "$rootdir" "$RUNNER_TEMP/root.squashfs"
+          test -x "$rootdir/usr/sbin/mkfs.f2fs"
+          test -x "$rootdir/usr/sbin/fsck.f2fs"
+          modules=("$rootdir"/lib/modules/*/f2fs.ko)
+          test "${#modules[@]}" -eq 1
+          test -s "${modules[0]}"
+          bootfiles=("$rootdir"/etc/modules-boot.d/*f2fs)
+          test "${#bootfiles[@]}" -eq 1
+          test -s "${bootfiles[0]}"
+          grep -qx f2fs "${bootfiles[0]}"
           fit="$RUNNER_TEMP/kernel.itb"
           dumpimage -l "$fit" > candidate/FIT.txt
           conf="$(fdtget "$fit" /configurations default)"

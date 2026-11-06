@@ -91,10 +91,15 @@ jobs:
           fi
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # Pinned LuCI selects virtual weechat; its conflicting providers form a Kconfig cycle.
+          # Select the default headless provider explicitly. This app remains unselected.
+          sed -i 's/+weechat /+weechat-minimal /' feeds/luci/applications/luci-app-weechat/Makefile
+          grep -qF '+weechat-minimal ' feeds/luci/applications/luci-app-weechat/Makefile
           cat ../config/jdcloud-re-cs-02-common.config \
             "../config/jdcloud-re-cs-02-${{ matrix.variant }}.config" > .config
           cp .config .config.requested
-          make defconfig
+          make defconfig 2>&1 | tee "$RUNNER_TEMP/openwrt-config.log"
+          if grep -q 'recursive dependency detected' "$RUNNER_TEMP/openwrt-config.log"; then exit 1; fi
           while IFS= read -r setting; do
             case "$setting" in
               CONFIG_*=y) grep -qxF "$setting" .config || { echo "Missing setting $setting"; exit 1; } ;;
@@ -302,6 +307,7 @@ jobs:
             candidate/*.json
             candidate/*.txt
             official/.config
+            ${{ runner.temp }}/openwrt-config.log
             ${{ runner.temp }}/openwrt-build.log
             ${{ runner.temp }}/ccache-stats.txt
           include-hidden-files: true

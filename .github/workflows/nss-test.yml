@@ -1,0 +1,159 @@
+name: Build RE-CS-02 NSS test on OpenWrt 25.12.6
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/nss-test.yml'
+      - 'scripts/stage-nss.py'
+      - 'config/jdcloud-re-cs-02-nss.config'
+      - 'nss-files/**'
+permissions:
+  contents: read
+jobs:
+  emmc-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt
+          ref: 64900e756efa667774214f9c6b17c113222e01f7
+          path: official
+      - uses: actions/checkout@v4
+        with:
+          repository: LiBwrt/LibWrt
+          ref: 96a0ec8a427909c4d9ef112641b36bcc0728fa43
+          path: nss-reference
+      - uses: actions/checkout@v4
+        with:
+          repository: jerrykuku/luci-theme-argon
+          ref: c6d63bd68aa9272e40c35cee5e615f45cc1e4eb0
+          path: official/package/custom/luci-theme-argon
+      - name: Install OpenWrt build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev libelf-dev libfuse3-dev libpython3-dev file wget python3-pyelftools device-tree-compiler u-boot-tools squashfs-tools
+      - name: Configure the eMMC candidate profile
+        working-directory: official
+        run: |
+          python3 ../scripts/stage-nss.py . ../nss-reference ..
+          printf '\nsrc-git nss_packages https://github.com/laipeng668/nss-packages.git^c425674d8feab34a3dc8045f9f4f4890d8fb6ca9\n' >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cp ../config/jdcloud-re-cs-02-nss.config .config
+          make defconfig
+          while IFS= read -r setting; do
+            case "$setting" in
+              CONFIG_*=y) grep -qxF "$setting" .config || { echo "Missing setting $setting"; exit 1; } ;;
+            esac
+          done < ../config/jdcloud-re-cs-02-nss.config
+          if grep -qx 'CONFIG_TARGET_ROOTFS_INITRAMFS=y' .config; then exit 1; fi
+      - name: Build OpenWrt
+        working-directory: official
+        run: make -j"$(nproc)" V=s > "$RUNNER_TEMP/openwrt-build.log" 2>&1 || { tail -200 "$RUNNER_TEMP/openwrt-build.log"; exit 1; }
+      - name: Verify sysupgrade structure, metadata and embedded FIT
+        run: |
+          set -o pipefail
+          set -x
+          shopt -s nullglob
+          images=(official/bin/targets/qualcommax/ipq60xx/*-jdcloud_re-cs-02-squashfs-sysupgrade.bin)
+          test "${#images[@]}" -eq 1
+          image="${images[0]}"
+          mkdir candidate
+          python3 scripts/check-sysupgrade.py "$image" | tee candidate/PREFLIGHT.json
+          official/staging_dir/host/bin/fwtool -q -i candidate/METADATA.json "$image"
+          python3 -c 'import json; metadata = json.load(open("candidate/METADATA.json")); assert "jdcloud,re-cs-02" in metadata["supported_devices"]; assert metadata["version"]["version"] == "25.12.6"'
+          tar -xOf "$image" sysupgrade-jdcloud_re-cs-02/kernel > "$RUNNER_TEMP/kernel.itb"
+          tar -xOf "$image" sysupgrade-jdcloud_re-cs-02/root > "$RUNNER_TEMP/root.squashfs"
+          unsquashfs -s "$RUNNER_TEMP/root.squashfs" > candidate/SQUASHFS.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" lib/upgrade/platform.sh > candidate/UPGRADE-PLATFORM.txt
+          grep -Fq 'CI_KERNPART="0:HLOS"' candidate/UPGRADE-PLATFORM.txt
+          grep -Fq 'CI_ROOTPART="rootfs"' candidate/UPGRADE-PLATFORM.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" www/cgi-bin/luci > /dev/null
+          unsquashfs -ll "$RUNNER_TEMP/root.squashfs" > candidate/ROOTFS-FILES.txt
+          rootdir="$RUNNER_TEMP/rootfs-check"
+          unsquashfs -d "$rootdir" "$RUNNER_TEMP/root.squashfs" \
+            usr/sbin lib/modules lib/firmware etc/modules.d etc/modules-boot.d
+          test -x "$rootdir/usr/sbin/mkfs.f2fs"
+          test -x "$rootdir/usr/sbin/fsck.f2fs"
+          modules=("$rootdir"/lib/modules/*/f2fs.ko)
+          test "${#modules[@]}" -eq 1
+          test -s "${modules[0]}"
+          bootfiles=("$rootdir"/etc/modules-boot.d/*f2fs)
+          test "${#bootfiles[@]}" -eq 1
+          test -s "${bootfiles[0]}"
+          grep -qx f2fs "${bootfiles[0]}"
+          for module in qca-nss-drv ecm; do
+            matches=("$rootdir"/lib/modules/*/"$module".ko)
+            test "${#matches[@]}" -eq 1
+            test -s "${matches[0]}"
+          done
+          test -s "$rootdir/lib/firmware/qca-nss0-retail.bin"
+          grep -R -q 'nss_offload=1' "$rootdir/etc/modules.d"
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" etc/uci-defaults/99-jdcloud-ui > candidate/DEFAULT-UI.txt
+          cmp nss-files/etc/uci-defaults/99-jdcloud-ui candidate/DEFAULT-UI.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" usr/lib/lua/luci/i18n/base.vi.lmo > /dev/null
+          fit="$RUNNER_TEMP/kernel.itb"
+          dumpimage -l "$fit" > candidate/FIT.txt
+          conf="$(fdtget "$fit" /configurations default)"
+          test "$conf" = 'config@cp03-c3'
+          kernel="$(fdtget "$fit" "/configurations/$conf" kernel)"
+          test "$(fdtget "$fit" "/images/$kernel" compression)" = gzip
+          test "$(fdtget -t x "$fit" "/images/$kernel" load)" = 41000000
+          test "$(fdtget -t x "$fit" "/images/$kernel" entry)" = 41000000
+          dumpimage -T flat_dt -p 1 -o "$RUNNER_TEMP/board.dtb" "$fit"
+          test "$(fdtget "$RUNNER_TEMP/board.dtb" / compatible)" = 'jdcloud,re-cs-02 qcom,ipq6018'
+          test "$(fdtget -t u "$RUNNER_TEMP/board.dtb" /soc/mmc@7804000 bus-width)" = 8
+          test "$(fdtget "$RUNNER_TEMP/board.dtb" /chosen bootargs-append)" = ' root=PARTLABEL=rootfs rootwait'
+          ports=(lan1 lan2 lan3 lan4 wan)
+          for i in "${!ports[@]}"; do
+            node="$(fdtget "$RUNNER_TEMP/board.dtb" /aliases "ethernet$i")"
+            test "$(fdtget "$RUNNER_TEMP/board.dtb" "$node" label)" = "${ports[i]}"
+          done
+          git -C official rev-parse HEAD > candidate/openwrt-commit.txt
+          git -C nss-reference rev-parse HEAD > candidate/nss-reference-commit.txt
+          git -C official/feeds/nss_packages rev-parse HEAD > candidate/nss-packages-commit.txt
+          git -C official/package/custom/luci-theme-argon rev-parse HEAD > candidate/argon-commit.txt
+          cp config/jdcloud-re-cs-02-nss.config candidate/
+          cp official/.config candidate/resolved.config
+          cp official/bin/targets/qualcommax/ipq60xx/feeds.buildinfo candidate/
+          (cd "$(dirname "$image")" && sha256sum "$(basename "$image")") > candidate/SHA256SUMS
+          cp "$image" candidate/
+          factories=(official/bin/targets/qualcommax/ipq60xx/*-jdcloud_re-cs-02-squashfs-factory.bin)
+          test "${#factories[@]}" -eq 1
+          factory="${factories[0]}"
+          official/staging_dir/host/bin/fwtool -q -i candidate/FACTORY-METADATA.json "$factory"
+          cmp candidate/METADATA.json candidate/FACTORY-METADATA.json
+          python3 scripts/check-factory.py "$image" "$factory" | tee candidate/FACTORY-CHECK.json
+          cp "$factory" candidate/
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" etc/config/wireless > candidate/DEFAULT-WIRELESS.txt
+          cmp files/etc/config/wireless candidate/DEFAULT-WIRELESS.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" etc/uci-defaults/99-jdcloud-lan > candidate/DEFAULT-LAN.txt
+          cmp files/etc/uci-defaults/99-jdcloud-lan candidate/DEFAULT-LAN.txt
+          for kind in sysupgrade factory; do
+            mv "candidate/$(basename "${images[0]}" | sed "s/sysupgrade.bin/$kind.bin/")" \
+              "candidate/openwrt-25.12.6-jdcloud-re-cs-02-nss-test-$kind.bin"
+          done
+          (cd candidate && sha256sum *.bin) > candidate/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: re-cs-02-openwrt-25.12.6-nss-test
+          path: candidate/
+          if-no-files-found: error
+
+
+
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: re-cs-02-nss-test-diagnostics
+          path: |
+            candidate/*.json
+            candidate/*.txt
+            official/.config
+            ${{ runner.temp }}/openwrt-build.log
+          include-hidden-files: true
+          if-no-files-found: warn

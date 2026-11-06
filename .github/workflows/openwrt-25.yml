@@ -1,12 +1,19 @@
 name: Build OpenWrt 25.12.6 for JDCloud RE-CS-02
 on:
   workflow_dispatch:
+    inputs:
+      publish_r1:
+        description: Publish the first Standard release
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
       - '.github/workflows/openwrt-25.yml'
       - 'patches/**'
       - 'scripts/check-sysupgrade.py'
+      - 'scripts/check-factory.py'
+      - 'files/**'
 permissions:
   contents: read
 jobs:
@@ -29,6 +36,8 @@ jobs:
         run: |
           git apply --check ../patches/re-cs-02.patch
           git apply ../patches/re-cs-02.patch
+          mkdir -p files
+          cp -a ../files/. files/
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           cat > .config <<'CONFIG'
@@ -108,9 +117,49 @@ jobs:
           cp official/bin/targets/qualcommax/ipq60xx/feeds.buildinfo candidate/
           (cd "$(dirname "$image")" && sha256sum "$(basename "$image")") > candidate/SHA256SUMS
           cp "$image" candidate/
+          factories=(official/bin/targets/qualcommax/ipq60xx/*-jdcloud_re-cs-02-squashfs-factory.bin)
+          test "${#factories[@]}" -eq 1
+          factory="${factories[0]}"
+          official/staging_dir/host/bin/fwtool -q -i candidate/FACTORY-METADATA.json "$factory"
+          cmp candidate/METADATA.json candidate/FACTORY-METADATA.json
+          python3 scripts/check-factory.py "$image" "$factory" | tee candidate/FACTORY-CHECK.json
+          cp "$factory" candidate/
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" etc/config/wireless > candidate/DEFAULT-WIRELESS.txt
+          cmp files/etc/config/wireless candidate/DEFAULT-WIRELESS.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" etc/uci-defaults/99-jdcloud-lan > candidate/DEFAULT-LAN.txt
+          cmp files/etc/uci-defaults/99-jdcloud-lan candidate/DEFAULT-LAN.txt
+          (cd candidate && sha256sum *.bin) > candidate/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: re-cs-02-openwrt-25.12.6-sysupgrade-candidate
           path: candidate/
           if-no-files-found: error
 
+
+
+  publish-r1:
+    needs: emmc-candidate
+    if: contains(github.event.head_commit.message, '[release-r1]') || inputs.publish_r1
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: re-cs-02-openwrt-25.12.6-sysupgrade-candidate
+          path: candidate
+      - name: Publish first Standard release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd candidate
+          sha256sum -c SHA256SUMS
+          gh release create v25.12.6-jdcloud-r1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "JDCloud RE-CS-02 — OpenWrt 25.12.6 Standard R1" \
+            --prerelease \
+            --notes-file ../RELEASE-NOTES.md \
+            *.bin SHA256SUMS PREFLIGHT.json FACTORY-CHECK.json \
+            METADATA.json FACTORY-METADATA.json resolved.config feeds.buildinfo

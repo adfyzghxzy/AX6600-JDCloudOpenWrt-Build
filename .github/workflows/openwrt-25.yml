@@ -1,11 +1,6 @@
 name: Build OpenWrt 25.12.6 for JDCloud RE-CS-02
 on:
   workflow_dispatch:
-    inputs:
-      publish_r1:
-        description: Publish the first Standard release
-        type: boolean
-        default: false
   push:
     branches: [main]
     paths:
@@ -136,30 +131,3 @@ jobs:
           if-no-files-found: error
 
 
-
-  publish-r1:
-    needs: emmc-candidate
-    if: contains(github.event.head_commit.message, '[release-r1]') || inputs.publish_r1
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: re-cs-02-openwrt-25.12.6-sysupgrade-candidate
-          path: candidate
-      - name: Publish first Standard release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd candidate
-          sha256sum -c SHA256SUMS
-          gh release create v25.12.6-jdcloud-r1 \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "JDCloud RE-CS-02 — OpenWrt 25.12.6 Standard R1" \
-            --prerelease \
-            --notes-file ../RELEASE-NOTES.md \
-            *.bin SHA256SUMS PREFLIGHT.json FACTORY-CHECK.json \
-            METADATA.json FACTORY-METADATA.json resolved.config feeds.buildinfo

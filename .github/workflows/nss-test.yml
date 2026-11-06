@@ -58,6 +58,9 @@ jobs:
             cp -a ../nss-files/. files/
           fi
           cp -a ../athena-reference/luci-app-athena-led package/custom/
+          # Preserve the pinned prebuilt ELF so its packaged SHA-256 remains verifiable.
+          sed -i '/^include.*feeds\/luci\/luci.mk/i RSTRIP:=:' package/custom/luci-app-athena-led/Makefile
+          grep -qx 'RSTRIP:=:' package/custom/luci-app-athena-led/Makefile
           chmod 0755 package/custom/luci-app-athena-led/root/usr/sbin/athena-led
           chmod 0755 package/custom/luci-app-athena-led/root/etc/init.d/athena_led
           echo '9f9c2c678137384945f4b58a62f001845f1ae3f5d1abee8f2528c1e28d4c0e4f  package/custom/luci-app-athena-led/root/usr/sbin/athena-led' | sha256sum -c -
@@ -189,12 +192,12 @@ jobs:
           cmp files/etc/uci-defaults/99-jdcloud-lan candidate/DEFAULT-LAN.txt
           for kind in sysupgrade factory; do
             mv "candidate/$(basename "${images[0]}" | sed "s/sysupgrade.bin/$kind.bin/")" \
-              "candidate/openwrt-25.12.6-jdcloud-re-cs-02-${{ matrix.variant }}-test3-$kind.bin"
+              "candidate/openwrt-25.12.6-jdcloud-re-cs-02-${{ matrix.variant }}-test4-$kind.bin"
           done
           (cd candidate && sha256sum *.bin) > candidate/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: re-cs-02-openwrt-25.12.6-${{ matrix.variant }}-test3
+          name: re-cs-02-openwrt-25.12.6-${{ matrix.variant }}-test4
           path: candidate/
           if-no-files-found: error
 
@@ -204,7 +207,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: re-cs-02-${{ matrix.variant }}-test3-diagnostics
+          name: re-cs-02-${{ matrix.variant }}-test4-diagnostics
           path: |
             candidate/*.json
             candidate/*.txt

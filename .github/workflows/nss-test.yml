@@ -1,4 +1,4 @@
-name: Build RE-CS-02 NSS test on OpenWrt 25.12.6
+name: Build RE-CS-02 Standard and NSS test on OpenWrt 25.12.6
 on:
   workflow_dispatch:
   push:
@@ -6,12 +6,17 @@ on:
     paths:
       - '.github/workflows/nss-test.yml'
       - 'scripts/stage-nss.py'
-      - 'config/jdcloud-re-cs-02-nss.config'
+      - 'config/**'
       - 'nss-files/**'
 permissions:
   contents: read
 jobs:
   emmc-candidate:
+    name: RE-CS-02 ${{ matrix.variant }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, nss]
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -31,6 +36,11 @@ jobs:
           repository: jerrykuku/luci-theme-argon
           ref: c6d63bd68aa9272e40c35cee5e615f45cc1e4eb0
           path: official/package/custom/luci-theme-argon
+      - uses: actions/checkout@v4
+        with:
+          repository: domi521/luci-app-athena-led-JS
+          ref: 40650c406596e67a1ad863f74fc1cf302ceebaf4
+          path: athena-reference
       - name: Install OpenWrt build dependencies
         run: |
           sudo apt-get update
@@ -38,17 +48,33 @@ jobs:
       - name: Configure the eMMC candidate profile
         working-directory: official
         run: |
-          python3 ../scripts/stage-nss.py . ../nss-reference ..
-          printf '\nsrc-git nss_packages https://github.com/laipeng668/nss-packages.git^c425674d8feab34a3dc8045f9f4f4890d8fb6ca9\n' >> feeds.conf.default
+          if [ "${{ matrix.variant }}" = nss ]; then
+            python3 ../scripts/stage-nss.py . ../nss-reference ..
+          else
+            git apply --check ../patches/re-cs-02.patch
+            git apply ../patches/re-cs-02.patch
+            mkdir -p files
+            cp -a ../files/. files/
+            cp -a ../nss-files/. files/
+          fi
+          cp -a ../athena-reference/luci-app-athena-led package/custom/
+          chmod 0755 package/custom/luci-app-athena-led/root/usr/sbin/athena-led
+          chmod 0755 package/custom/luci-app-athena-led/root/etc/init.d/athena_led
+          echo '9f9c2c678137384945f4b58a62f001845f1ae3f5d1abee8f2528c1e28d4c0e4f  package/custom/luci-app-athena-led/root/usr/sbin/athena-led' | sha256sum -c -
+          if [ "${{ matrix.variant }}" = nss ]; then
+            printf '\nsrc-git nss_packages https://github.com/laipeng668/nss-packages.git^c425674d8feab34a3dc8045f9f4f4890d8fb6ca9\n' >> feeds.conf.default
+          fi
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          cp ../config/jdcloud-re-cs-02-nss.config .config
+          cat ../config/jdcloud-re-cs-02-common.config \
+            "../config/jdcloud-re-cs-02-${{ matrix.variant }}.config" > .config
+          cp .config .config.requested
           make defconfig
           while IFS= read -r setting; do
             case "$setting" in
               CONFIG_*=y) grep -qxF "$setting" .config || { echo "Missing setting $setting"; exit 1; } ;;
             esac
-          done < ../config/jdcloud-re-cs-02-nss.config
+          done < .config.requested
           if grep -qx 'CONFIG_TARGET_ROOTFS_INITRAMFS=y' .config; then exit 1; fi
       - name: Build OpenWrt
         working-directory: official
@@ -65,8 +91,11 @@ jobs:
           kernel_configs=(official/build_dir/target-*/linux-qualcommax_ipq60xx/linux-6.12.*/.config)
           test "${#kernel_configs[@]}" -eq 1
           cp "${kernel_configs[0]}" candidate/kernel.config
+          grep -qx 'CONFIG_GPIO_SYSFS=y' candidate/kernel.config
           grep -qx 'CONFIG_NF_CONNTRACK_EVENTS=y' candidate/kernel.config
-          grep -qx 'CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y' candidate/kernel.config
+          if [ "${{ matrix.variant }}" = nss ]; then
+            grep -qx 'CONFIG_NF_CONNTRACK_CHAIN_EVENTS=y' candidate/kernel.config
+          fi
           python3 scripts/check-sysupgrade.py "$image" | tee candidate/PREFLIGHT.json
           official/staging_dir/host/bin/fwtool -q -i candidate/METADATA.json "$image"
           python3 -c 'import json; metadata = json.load(open("candidate/METADATA.json")); assert "jdcloud,re-cs-02" in metadata["supported_devices"]; assert metadata["version"]["version"] == "25.12.6"'
@@ -90,22 +119,35 @@ jobs:
           test "${#bootfiles[@]}" -eq 1
           test -s "${bootfiles[0]}"
           grep -qx f2fs "${bootfiles[0]}"
-          for module in qca-nss-drv ecm; do
-            matches=("$rootdir"/lib/modules/*/"$module".ko)
-            test "${#matches[@]}" -eq 1
-            test -s "${matches[0]}"
-          done
-          test -s "$rootdir/lib/firmware/qca-nss0-retail.bin"
+          if [ "${{ matrix.variant }}" = nss ]; then
+            for module in qca-nss-drv ecm; do
+              matches=("$rootdir"/lib/modules/*/"$module".ko)
+              test "${#matches[@]}" -eq 1
+              test -s "${matches[0]}"
+            done
+            test -s "$rootdir/lib/firmware/qca-nss0-retail.bin"
+          fi
           conntrack_modules=("$rootdir"/lib/modules/*/nf_conntrack.ko)
           test "${#conntrack_modules[@]}" -eq 1
           grep -aq nf_conntrack_events "${conntrack_modules[0]}"
           netlink_modules=("$rootdir"/lib/modules/*/nf_conntrack_netlink.ko)
           test "${#netlink_modules[@]}" -eq 1
           test -s "${netlink_modules[0]}"
-          grep -R -q 'nss_offload=1' "$rootdir/etc/modules.d"
+          if [ "${{ matrix.variant }}" = nss ]; then
+            grep -R -q 'nss_offload=1' "$rootdir/etc/modules.d"
+          else
+            test ! -e "$rootdir/lib/firmware/qca-nss0-retail.bin"
+            test -z "$(find "$rootdir/lib/modules" -name ecm.ko)"
+          fi
           unsquashfs -cat "$RUNNER_TEMP/root.squashfs" etc/uci-defaults/99-jdcloud-ui > candidate/DEFAULT-UI.txt
           cmp nss-files/etc/uci-defaults/99-jdcloud-ui candidate/DEFAULT-UI.txt
           unsquashfs -cat "$RUNNER_TEMP/root.squashfs" usr/lib/lua/luci/i18n/base.vi.lmo > /dev/null
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" etc/config/athena_led > candidate/DEFAULT-LED.txt
+          cmp nss-files/etc/config/athena_led candidate/DEFAULT-LED.txt
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" usr/sbin/athena-led > "$RUNNER_TEMP/athena-led"
+          echo "9f9c2c678137384945f4b58a62f001845f1ae3f5d1abee8f2528c1e28d4c0e4f  $RUNNER_TEMP/athena-led" | sha256sum -c -
+          unsquashfs -cat "$RUNNER_TEMP/root.squashfs" www/luci-static/resources/view/athena_led.js > /dev/null
+          grep -q 'etc/rc.d/S99athena_led' candidate/ROOTFS-FILES.txt
           fit="$RUNNER_TEMP/kernel.itb"
           dumpimage -l "$fit" > candidate/FIT.txt
           conf="$(fdtget "$fit" /configurations default)"
@@ -127,7 +169,9 @@ jobs:
           git -C nss-reference rev-parse HEAD > candidate/nss-reference-commit.txt
           git -C official/feeds/nss_packages rev-parse HEAD > candidate/nss-packages-commit.txt
           git -C official/package/custom/luci-theme-argon rev-parse HEAD > candidate/argon-commit.txt
-          cp config/jdcloud-re-cs-02-nss.config candidate/
+          git -C athena-reference rev-parse HEAD > candidate/athena-commit.txt
+          cp config/jdcloud-re-cs-02-common.config candidate/
+          cp "config/jdcloud-re-cs-02-${{ matrix.variant }}.config" candidate/
           cp official/.config candidate/resolved.config
           cp official/bin/targets/qualcommax/ipq60xx/feeds.buildinfo candidate/
           (cd "$(dirname "$image")" && sha256sum "$(basename "$image")") > candidate/SHA256SUMS
@@ -145,12 +189,12 @@ jobs:
           cmp files/etc/uci-defaults/99-jdcloud-lan candidate/DEFAULT-LAN.txt
           for kind in sysupgrade factory; do
             mv "candidate/$(basename "${images[0]}" | sed "s/sysupgrade.bin/$kind.bin/")" \
-              "candidate/openwrt-25.12.6-jdcloud-re-cs-02-nss-test2-$kind.bin"
+              "candidate/openwrt-25.12.6-jdcloud-re-cs-02-${{ matrix.variant }}-test3-$kind.bin"
           done
           (cd candidate && sha256sum *.bin) > candidate/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: re-cs-02-openwrt-25.12.6-nss-test2
+          name: re-cs-02-openwrt-25.12.6-${{ matrix.variant }}-test3
           path: candidate/
           if-no-files-found: error
 
@@ -160,7 +204,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: re-cs-02-nss-test-diagnostics
+          name: re-cs-02-${{ matrix.variant }}-test3-diagnostics
           path: |
             candidate/*.json
             candidate/*.txt

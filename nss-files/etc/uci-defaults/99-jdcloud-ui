@@ -10,4 +10,5 @@ uci commit luci
 uci commit system
 uci commit firewall
 uci commit network
+/etc/init.d/athena_led enable
 exit 0

@@ -75,7 +75,8 @@ jobs:
           unsquashfs -cat "$RUNNER_TEMP/root.squashfs" www/cgi-bin/luci > /dev/null
           unsquashfs -ll "$RUNNER_TEMP/root.squashfs" > candidate/ROOTFS-FILES.txt
           rootdir="$RUNNER_TEMP/rootfs-check"
-          unsquashfs -d "$rootdir" "$RUNNER_TEMP/root.squashfs"
+          unsquashfs -d "$rootdir" "$RUNNER_TEMP/root.squashfs" \
+            usr/sbin lib/modules etc/modules.d etc/modules-boot.d
           test -x "$rootdir/usr/sbin/mkfs.f2fs"
           test -x "$rootdir/usr/sbin/fsck.f2fs"
           modules=("$rootdir"/lib/modules/*/f2fs.ko)

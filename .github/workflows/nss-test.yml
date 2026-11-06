@@ -1,11 +1,24 @@
 name: Build RE-CS-02 Standard and NSS test on OpenWrt 25.12.6
 on:
   workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Bản cần build'
+        type: choice
+        options: [both, standard, nss]
+        default: both
+      clean_build:
+        description: 'Build sạch: không khôi phục hoặc lưu cache'
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
       - '.github/workflows/nss-test.yml'
       - 'scripts/stage-nss.py'
+      - 'scripts/build-cache.py'
+      - 'files/**'
+      - 'patches/**'
       - 'config/**'
       - 'nss-files/**'
 permissions:
@@ -16,10 +29,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [standard, nss]
+        variant: ${{ fromJSON(github.event_name != 'workflow_dispatch' && '["standard","nss"]' || inputs.variant == 'standard' && '["standard"]' || inputs.variant == 'nss' && '["nss"]' || '["standard","nss"]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/official/.ccache
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Start timing
+        run: echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
@@ -79,9 +101,75 @@ jobs:
             esac
           done < .config.requested
           if grep -qx 'CONFIG_TARGET_ROOTFS_INITRAMFS=y' .config; then exit 1; fi
+      - name: Fingerprint toolchain inputs
+        id: cache-key
+        run: python3 scripts/build-cache.py official
+      - name: Restore downloaded sources
+        id: downloads
+        if: ${{ !inputs.clean_build }}
+        uses: actions/cache/restore@v4
+        with:
+          path: official/dl
+          key: sources-v1-${{ runner.os }}-${{ hashFiles('official/.config', 'official/feeds.conf.default', 'official/feeds/*/index') }}-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sources-v1-${{ runner.os }}-
+      - name: Restore compiler cache
+        id: ccache
+        if: ${{ !inputs.clean_build }}
+        uses: actions/cache/restore@v4
+        with:
+          path: official/.ccache
+          key: ccache-v1-${{ runner.os }}-${{ matrix.variant }}-${{ steps.cache-key.outputs.toolchain }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-v1-${{ runner.os }}-${{ matrix.variant }}-${{ steps.cache-key.outputs.toolchain }}-
+            ccache-v1-${{ runner.os }}-${{ matrix.variant }}-
+      - name: Restore exact toolchain and host tools
+        id: toolchain
+        if: ${{ !inputs.clean_build }}
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            official/build_dir/host
+            official/build_dir/toolchain-*
+            official/staging_dir/host
+            official/staging_dir/toolchain-*
+          key: toolchain-v1-${{ runner.os }}-${{ matrix.variant }}-${{ steps.cache-key.outputs.toolchain }}
       - name: Build OpenWrt
+        id: build
         working-directory: official
-        run: make -j"$(nproc)" V=s > "$RUNNER_TEMP/openwrt-build.log" 2>&1 || { tail -200 "$RUNNER_TEMP/openwrt-build.log"; exit 1; }
+        run: |
+          start=$(date +%s)
+          if [ -x staging_dir/host/bin/ccache ]; then staging_dir/host/bin/ccache -z; fi
+          status=0
+          make -j"$(nproc)" V=s > "$RUNNER_TEMP/openwrt-build.log" 2>&1 || status=$?
+          echo "seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
+          if [ -x staging_dir/host/bin/ccache ]; then
+            staging_dir/host/bin/ccache -s | tee "$RUNNER_TEMP/ccache-stats.txt"
+          fi
+          if [ "$status" -ne 0 ]; then tail -200 "$RUNNER_TEMP/openwrt-build.log"; fi
+          exit "$status"
+      - name: Save downloaded sources
+        if: ${{ !cancelled() && !inputs.clean_build && steps.build.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: official/dl
+          key: ${{ steps.downloads.outputs.cache-primary-key }}
+      - name: Save compiler cache
+        if: ${{ !cancelled() && !inputs.clean_build && steps.build.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: official/.ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+      - name: Save toolchain and host tools
+        if: ${{ !cancelled() && !inputs.clean_build && steps.build.outcome == 'success' && steps.toolchain.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            official/build_dir/host
+            official/build_dir/toolchain-*
+            official/staging_dir/host
+            official/staging_dir/toolchain-*
+          key: ${{ steps.toolchain.outputs.cache-primary-key }}
       - name: Verify sysupgrade structure, metadata and embedded FIT
         run: |
           set -o pipefail
@@ -170,7 +258,9 @@ jobs:
           done
           git -C official rev-parse HEAD > candidate/openwrt-commit.txt
           git -C nss-reference rev-parse HEAD > candidate/nss-reference-commit.txt
-          git -C official/feeds/nss_packages rev-parse HEAD > candidate/nss-packages-commit.txt
+          if [ "${{ matrix.variant }}" = nss ]; then
+            git -C official/feeds/nss_packages rev-parse HEAD > candidate/nss-packages-commit.txt
+          fi
           git -C official/package/custom/luci-theme-argon rev-parse HEAD > candidate/argon-commit.txt
           git -C athena-reference rev-parse HEAD > candidate/athena-commit.txt
           cp config/jdcloud-re-cs-02-common.config candidate/
@@ -213,5 +303,33 @@ jobs:
             candidate/*.txt
             official/.config
             ${{ runner.temp }}/openwrt-build.log
+            ${{ runner.temp }}/ccache-stats.txt
           include-hidden-files: true
           if-no-files-found: warn
+
+
+      - name: Build and cache summary
+        if: always()
+        env:
+          VARIANT: ${{ matrix.variant }}
+          CLEAN_BUILD: ${{ inputs.clean_build || false }}
+          DOWNLOADS_RESTORED: ${{ steps.downloads.outputs.cache-matched-key }}
+          CCACHE_RESTORED: ${{ steps.ccache.outputs.cache-matched-key }}
+          TOOLCHAIN_HIT: ${{ steps.toolchain.outputs.cache-hit }}
+          BUILD_SECONDS: ${{ steps.build.outputs.seconds }}
+        run: |
+          {
+            echo "### Build $VARIANT"
+            echo "- Build sạch: $CLEAN_BUILD"
+            echo "- Nguồn tải về có cache: $([ -n "$DOWNLOADS_RESTORED" ] && echo có || echo không)"
+            echo "- Ccache có dữ liệu cũ: $([ -n "$CCACHE_RESTORED" ] && echo có || echo không)"
+            echo "- Toolchain khớp khóa: ${TOOLCHAIN_HIT:-false}"
+            echo "- Thời gian bước biên dịch: ${BUILD_SECONDS:-chưa chạy} giây"
+            echo "- Tổng thời gian job đến bước báo cáo: $(( $(date +%s) - JOB_STARTED )) giây"
+            if [ -f "$RUNNER_TEMP/ccache-stats.txt" ]; then
+              echo
+              echo '```text'
+              cat "$RUNNER_TEMP/ccache-stats.txt"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

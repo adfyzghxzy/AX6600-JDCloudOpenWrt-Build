@@ -1,0 +1,39 @@
+name: Publish R5 from verified Test5
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-r5.yml'
+      - 'scripts/publish-r5.py'
+      - 'docs/releases/r5.md'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-r5
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify successful source build and artifact identity
+        run: python3 scripts/publish-r5.py --verify-source
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 42321445516
+          name: re-cs-02-openwrt-25.12.6-standard-test5
+          path: downloaded/standard
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 42321445516
+          name: re-cs-02-openwrt-25.12.6-nss-test5
+          path: downloaded/nss
+      - name: Verify checksums, package metadata and publish R5
+        run: python3 scripts/publish-r5.py

@@ -1,9 +1,40 @@
-# OpenWrt cho JDCloud AX6600 (RE-CS-02)
+# OpenWrt cho JDCloud AX6600
+Dành cho **RE-CS-02**, eMMC, nền **OpenWrt 25.12.6**.
 
-Nhánh `main` build firmware eMMC cho JDCloud RE-CS-02 (`qualcommax/ipq60xx`). Mã nguồn nền được ghim ở tag OpenWrt `v25.12.6`. Bản vá trong `patches/re-cs-02.patch` chuyển phần hỗ trợ thiết bị từ upstream và cấu hình gói `sysupgrade` cho `0:HLOS` và `rootfs`.
+## Tải firmware
 
-## Build và kiểm tra
+[Tải R5 — Standard và NSS](https://github.com/adfyzghxzy/AX6600-JDCloudOpenWrt-Build/releases/tag/v25.12.6-jdcloud-r5)
 
-Mở tab **Actions**, chọn workflow **Build OpenWrt 25.12.6 for JDCloud RE-CS-02** và chọn nhánh `main`. Workflow kiểm tra kernel FIT nằm trong giới hạn 6 MiB, rootfs SquashFS có LuCI, metadata đúng model và DTB khai báo các cổng Ethernet.
+| Bản | Nội dung |
+|---|---|
+| **Standard** | Không tăng tốc luồng NSS/ECM; phù hợp dùng modem USB |
+| **NSS** | Thêm Qualcomm NSS/ECM; WWAN USB chưa được xác nhận offload |
+| **R1 cũ** | Bản Standard nền ban đầu |
 
-Khi workflow thành công, tải artifact `re-cs-02-openwrt-25.12.6-sysupgrade-candidate` và đối chiếu file `.bin` với `SHA256SUMS`. Đây là firmware thử nghiệm cho RE-CS-02. Trước khi flash qua LuCI, chạy `sysupgrade -T /tmp/<tên-file-sysupgrade.bin>` trên firmware hiện tại. Dừng nếu kiểm tra thất bại hoặc LuCI yêu cầu **Force upgrade**.
+R5 có Argon, tiếng Việt, terminal web, LED Athena và bộ USB QMI/MBIM.
+[Xem thay đổi và tình trạng kiểm tra](RELEASE-NOTES.md).
+
+## Flash
+
+Qua LuCI chọn file `*-sysupgrade.bin` đúng biến thể. Bỏ **Keep settings** để nhận toàn bộ mặc định mới.
+LAN: `192.168.10.1`. WiFi: `JDCloud`, mật khẩu: `14789632`. Đổi mật khẩu sau khi cài.
+Kiểm tra `SHA256SUMS`; không Force upgrade. Factory chưa được kiểm chứng flash qua U-Boot mod.
+
+## Tự build
+
+[Actions → Standard/NSS → Run workflow](https://github.com/adfyzghxzy/AX6600-JDCloudOpenWrt-Build/actions/workflows/nss-test.yml):
+chọn `standard`, `nss` hoặc `both`. Để **Build sạch** tắt để dùng cache.
+
+| File | Chỉnh gì? |
+|---|---|
+| [common.config](config/jdcloud-re-cs-02-common.config) | Package dùng chung |
+| [standard.config](config/jdcloud-re-cs-02-standard.config) | Riêng Standard |
+| [nss.config](config/jdcloud-re-cs-02-nss.config) | Riêng NSS |
+
+`CONFIG_PACKAGE_ten-goi=y`: đưa vào firmware; `# CONFIG_PACKAGE_ten-goi is not set`: không chọn.
+Gói ngoài feed cần tích hợp nguồn và kiểm tra phụ thuộc trước khi build.
+
+## Tiếp tục với AI khác
+
+Gửi link repo và yêu cầu đọc [AGENTS.md](AGENTS.md), config, workflow, ghi chú Release.
+Không cần quay lại cuộc chat cũ. Nêu rõ package muốn thêm và biến thể cần build.
